@@ -1,5 +1,5 @@
--- ROM Loader for Game Boy Emulator - Roblox Version
--- Handles loading Game Boy ROM data from Roblox-compatible sources
+-- ROM Loader for Game Boy Emulator - Roblox Version with Chunking
+-- Handles loading Game Boy ROM data from Roblox-compatible sources in chunks
 
 local ROMLoader = {}
 ROMLoader.__index = ROMLoader
@@ -35,15 +35,71 @@ local CARTRIDGE_TYPES = {
 
 function ROMLoader.new()
 	local self = setmetatable({}, ROMLoader)
+	self.chunkSize = 10000  -- Default chunk size (10KB per chunk)
 	return self
 end
 
-function ROMLoader:loadFromAsset(assetId)
-	-- Load ROM from a Roblox asset (e.g., decal, image, or uploaded file)
-	-- This requires the asset to be converted to binary data
-	-- For now, this is a placeholder
-	warn("Asset loading not fully supported - use base64 encoded ROMs instead")
-	return nil
+function ROMLoader:setChunkSize(size)
+	self.chunkSize = size
+end
+
+function ROMLoader:loadFromChunks(chunkFolder)
+	-- Load ROM from multiple ModuleScripts in a folder
+	-- Each ModuleScript should be named "Chunk_0", "Chunk_1", "Chunk_2", etc.
+	-- and should return a string of binary data
+	
+	if not chunkFolder then
+		return nil, "No chunk folder provided"
+	end
+	
+	local romData = ""
+	local chunkIndex = 0
+	local success = true
+	
+	while true do
+		local chunkName = "Chunk_" .. tostring(chunkIndex)
+		local chunkModule = chunkFolder:FindFirstChild(chunkName)
+		
+		if not chunkModule then
+			-- No more chunks
+			break
+		end
+		
+		local loadSuccess, chunkData = pcall(function()
+			return require(chunkModule)
+		end)
+		
+		if not loadSuccess then
+			return nil, "Failed to load chunk " .. chunkIndex .. ": " .. tostring(chunkData)
+		end
+		
+		if type(chunkData) ~= "string" then
+			return nil, "Chunk " .. chunkIndex .. " did not return a string"
+		end
+		
+		romData = romData .. chunkData
+		chunkIndex = chunkIndex + 1
+	end
+	
+	if #romData == 0 then
+		return nil, "No chunks found in folder"
+	end
+	
+	return romData, "ROM loaded from " .. chunkIndex .. " chunks (" .. #romData .. " bytes)"
+end
+
+function ROMLoader:createChunks(romData, outputSize)
+	-- Create an array of chunks from ROM data for distribution
+	-- This helps you determine how to split your ROM
+	local chunks = {}
+	local chunkSize = self.chunkSize
+	
+	for i = 1, #romData, chunkSize do
+		local chunk = romData:sub(i, i + chunkSize - 1)
+		table.insert(chunks, chunk)
+	end
+	
+	return chunks, "Created " .. #chunks .. " chunks"
 end
 
 function ROMLoader:decodeBase64(str)
@@ -57,18 +113,30 @@ function ROMLoader:decodeBase64(str)
 		local chunk = str:sub(i, i + 3)
 		local c1, c2, c3, c4 = chunk:byte(1), chunk:byte(2), chunk:byte(3), chunk:byte(4)
 		
+		if not c1 then break end
+		
 		local p1 = base64chars:find(string.char(c1)) - 1
 		local p2 = base64chars:find(string.char(c2)) - 1
-		local p3 = base64chars:find(string.char(c3)) - 1 or 0
-		local p4 = base64chars:find(string.char(c4)) - 1 or 0
+		local p3 = c3 and base64chars:find(string.char(c3)) or 0
+		local p4 = c4 and base64chars:find(string.char(c4)) or 0
+		
+		if p3 then p3 = p3 - 1 end
+		if p4 then p4 = p4 - 1 end
+		
+		if not p1 or not p2 then break end
 		
 		local b1 = bit32.bor(bit32.lshift(p1, 2), bit32.rshift(p2, 4))
-		local b2 = bit32.bor(bit32.lshift(bit32.band(p2, 15), 4), bit32.rshift(p3, 2))
-		local b3 = bit32.bor(bit32.lshift(bit32.band(p3, 3), 6), p4)
-		
 		result = result .. string.char(b1)
-		if c3 ~= string.byte("=") then result = result .. string.char(b2) end
-		if c4 ~= string.byte("=") then result = result .. string.char(b3) end
+		
+		if p3 and p3 >= 0 then
+			local b2 = bit32.bor(bit32.lshift(bit32.band(p2, 15), 4), bit32.rshift(p3, 2))
+			result = result .. string.char(b2)
+		end
+		
+		if p4 and p4 >= 0 and c4 ~= string.byte("=") then
+			local b3 = bit32.bor(bit32.lshift(bit32.band(p3, 3), 6), p4)
+			result = result .. string.char(b3)
+		end
 	end
 	
 	return result
@@ -76,7 +144,6 @@ end
 
 function ROMLoader:loadFromDataModule(moduleScript)
 	-- Load ROM data from a ModuleScript that contains binary ROM data
-	-- Usage: Create a ModuleScript that returns a string of binary data
 	if not moduleScript then
 		return nil, "No module provided"
 	end
@@ -100,7 +167,6 @@ end
 
 function ROMLoader:createTestROM()
 	-- Create a minimal test ROM for demonstration
-	-- This is a very basic ROM that won't do much but can be displayed
 	local rom = {}
 	
 	-- ROM header at 0x100-0x14F
